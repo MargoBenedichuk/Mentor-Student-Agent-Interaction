@@ -1,0 +1,10 @@
+TODO (Role 3 — Student Prompt Engineer)
+
+Blocks to write, in order:
+1. Personality: curious, hasty, occasionally overconfident, realistic (don't overact)
+2. Hard rule: practice specifics come ONLY from student_practice_log. If the log is empty,
+   the student has no concrete detail and that must show in the answers.
+3. Clarifying questions: 0-2 substantive per lesson; on bluff lessons keep them vague/deflecting.
+4. Coordinate with Role 1 on which lessons (3, 6, 9 per bluff_schedule.json) the bluff lands on.
+
+Before editing this file, save the current version to versions/vN.txt.
