@@ -1,0 +1,10 @@
+TODO (Role 2 — Mentor Prompt Engineer)
+
+Blocks to write, in order:
+1. Personality + strictness
+2. Lesson structure: explanation -> understanding check -> application check -> transfer
+3. Bluff-detection rules: never accept a smooth report at face value; always ask what went wrong / what was hard
+4. Tool usage: ledger_read / ledger_write, advance_decision
+5. Recall weak_spots from mentor_ledger at the start of each new lesson
+
+Before editing this file, save the current version to versions/vN.txt.
