@@ -1,0 +1,12 @@
+[project]
+name = "ai-task-2-mentor-sim"
+version = "0.1.0"
+description = "Prototype multi-agent mentor/student simulation for homework 1"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "pydantic>=2.8.0",
+]
+
+[tool.uv]
+package = false
