@@ -38,11 +38,12 @@ MENTOR_TOOLS = [
         "type": "function",
         "function": {
             "name": "advance_decision",
-            "description": "End the lesson with your gate verdict. Call this exactly once per lesson.",
+            "description": "End the lesson with your verdict, once you have enough evidence. If you are not "
+                           "ready to decide, ask another follow-up question instead of calling this.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "verdict": {"type": "string", "enum": ["PASS", "RETRY", "BLUFF_SUSPECTED"]},
+                    "verdict": {"type": "string", "enum": ["PASS", "BLUFF_SUSPECTED"]},
                     "reason": {"type": "string", "description": "One sentence justifying the verdict."},
                     "weak_spots": {"type": "array", "items": {"type": "string"},
                                     "description": "1-2 short phrases naming what the student was shaky on, for recall in later lessons."},

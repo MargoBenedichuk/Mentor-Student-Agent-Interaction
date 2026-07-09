@@ -38,21 +38,37 @@ def test_simulator_deterministic():
     a = simulate_practice("1", 7)
     b = simulate_practice("1", 7)
     assert a == b  # same (lesson, seed) -> same outcome
-    for key in ("lesson", "attempted", "concrete_detail", "friction", "outcome"):
+    for key in ("lesson", "attempted", "concrete_detail", "snippet", "friction", "surprise", "outcome"):
         assert a[key]
     assert a["lesson"] == "1"
-    assert simulate_practice("99", 1)["friction"]  # generic fallback still valid
+    fallback = simulate_practice("99", 1)  # generic fallback still carries the full schema
+    assert fallback["friction"] and fallback["snippet"] and fallback["surprise"]
+
+
+def test_simulator_examples_are_not_the_lesson_examples():
+    """Honest-lesson practice must use the student's OWN material, not the lecture's
+    illustration — recycling the lesson example reads as parroting, not real practice."""
+    from practice_simulator import _BANK
+    # phrases lifted straight from course_design.md's lesson / transfer scenarios
+    banned = ["summarize this and also translate it", "look at this email and fix it up",
+              "explain the difference between rest and graphql", "is this business plan viable"]
+    for lid in ("1", "2", "4", "5", "7", "8", "10"):  # honest lessons only
+        for variant in _BANK[lid]:
+            blob = " ".join(variant.values()).lower()
+            for phrase in banned:
+                assert phrase not in blob, f"lesson {lid} reuses the lecture example: {phrase!r}"
 
 
 def test_advance_decision():
     assert advance_decision.validate("pass") == "PASS"
     assert advance_decision.validate("Bluff_Suspected") == "BLUFF_SUSPECTED"
-    with pytest.raises(ValueError):
-        advance_decision.validate("maybe")
+    for bad in ("maybe", "retry"):  # RETRY was folded into "just ask again" — no longer valid
+        with pytest.raises(ValueError):
+            advance_decision.validate(bad)
     d = AdvanceDecision()
     assert d.verdict is None
-    d.record("retry", "needs another go")
-    assert d.verdict == "RETRY" and d.reason == "needs another go"
+    d.record("bluff_suspected", "no real specifics")
+    assert d.verdict == "BLUFF_SUSPECTED" and d.reason == "no real specifics"
     d.reset()
     assert d.verdict is None
 

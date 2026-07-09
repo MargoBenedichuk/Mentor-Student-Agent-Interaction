@@ -1,16 +1,16 @@
 """Advance decision — the mentor's hard gate at the end of a lesson.
 
-The mentor calls the `advance_decision` tool exactly once per lesson with one of:
+The mentor calls the `advance_decision` tool once it has enough evidence, with one of:
 
-    PASS             the student genuinely applied the skill -> orchestrator advances
-    RETRY            partial / not yet convincing -> another exchange on the same lesson
+    PASS             the student genuinely applied the skill
     BLUFF_SUSPECTED  smooth report but specifics missing, generic, or invented
 
-`relay.py` reads the recorded verdict to decide what to do next; only PASS moves
-the course forward on its own.
+There is no RETRY verdict: "not yet convinced" is expressed by asking another
+follow-up in the adaptive probe, not by a verdict. `relay.py` records the verdict
+and advances (a caught bluff still advances so the whole course runs).
 """
 
-VALID_VERDICTS = ("PASS", "RETRY", "BLUFF_SUSPECTED")
+VALID_VERDICTS = ("PASS", "BLUFF_SUSPECTED")
 
 
 def validate(verdict: str) -> str:

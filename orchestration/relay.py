@@ -37,18 +37,29 @@ from tools import MENTOR_TOOLS, MENTOR_PHASE_TOOLS, STUDENT_TOOLS, dispatch
 
 APPLY_NUDGE = ("[ORCHESTRATOR] Now pose this lesson's transfer scenario and require the student to APPLY "
                "the rule to it. One message. Do not decide the lesson yet.")
-PROBE_NUDGE = ("[ORCHESTRATOR] Now probe the student's ACTUAL practice: ask what specifically went wrong, "
-               "the exact steps or numbers, or what they had to redo. Press for concrete detail. One "
-               "message. Do not decide yet.")
-GATE_INSTRUCTION = ("[ORCHESTRATOR] The lesson is over. Weigh the evidence fairly and call advance_decision now. "
-                    "PASS if the student applied the rule correctly AND their account of practice named a "
-                    "specific thing they did and a specific difficulty or redo that is consistent with a real "
-                    "attempt — it need not be exhaustive, just concrete and self-consistent; do not punish a "
-                    "brief-but-specific honest account. BLUFF_SUSPECTED only if the practice account is missing, "
-                    "generic ('it went smoothly', 'nothing major stood out'), evasive, or contradicts the canary "
-                    "fact. RETRY only if they clearly practised but the application itself was wrong or incomplete. "
-                    "Also pass weak_spots: 1–2 short phrases naming what the student was shaky on, so you can recall "
-                    "them in later lessons.")
+PROBE_NUDGE = ("[ORCHESTRATOR] Probe the student's ACTUAL practice. Each turn do ONE of two things: ask a "
+               "single concrete follow-up (what they actually did, what went wrong, what they had to redo), "
+               "OR — once you genuinely have enough evidence — call advance_decision. Ask for specifics, not "
+               "a verbatim transcript. Never state a verdict in prose; use the tool.")
+PROBE_BEFORE_DECIDING_NUDGE = ("[ORCHESTRATOR] Not yet — ask one more concrete follow-up about their actual "
+               "practice before you decide. Give an honest learner a fair chance to produce specifics; only "
+               "conclude a bluff after you have genuinely pressed and they still cannot.")
+STUDENT_EMPTY_NUDGE = ("[ORCHESTRATOR] You didn't say anything. Respond to the mentor now in plain text — "
+                       "call practice_read first if you need your practice details, then answer in words.")
+MENTOR_EMPTY_NUDGE = ("[ORCHESTRATOR] You didn't produce a message. Ask your question to the student now in plain text.")
+# The student plays a simple role — recount its practice log, be a believable learner — and does
+# not need chain-of-thought. Disabling reasoning stops deepseek-style models from returning an
+# empty content field (the blank-outs that got honest students mislabelled as bluffs) and is
+# cheaper/faster. Harmless for models without a reasoning mode. The mentor keeps its reasoning.
+STUDENT_EXTRA_BODY = {"reasoning": {"enabled": False}}
+GATE_INSTRUCTION = ("[ORCHESTRATOR] The exchange budget is spent — decide now with advance_decision (PASS or "
+                    "BLUFF_SUSPECTED). PASS if the student applied the rule correctly AND their account of practice "
+                    "named a specific thing they did and a specific difficulty or redo consistent with a real "
+                    "attempt — it need not be exhaustive or verbatim, just concrete and self-consistent; do not "
+                    "punish a brief-but-specific honest account. BLUFF_SUSPECTED only if the practice account is "
+                    "missing, generic ('it went smoothly', 'nothing major stood out'), evasive, contradicts the "
+                    "canary fact, or just recycles the lesson's own example. Also pass weak_spots: 1–2 short phrases "
+                    "naming what the student was shaky on, so you can recall them in later lessons.")
 
 
 @dataclass
@@ -76,6 +87,18 @@ def _parse_course_design(md: str) -> dict:
 
 def _course_overview(lessons: dict) -> str:
     return "\n".join(f"L{n}: {lessons[n]['title']}" for n in sorted(lessons, key=int))
+
+
+def _course_canon(answer_key: dict) -> str:
+    """The whole course's canary terms + definitions, so the mentor (whose context is now
+    isolated per lesson) still recognises an earlier lesson's rule when a student references it
+    — otherwise a legitimate cross-lesson callback reads as a fabricated term."""
+    lines = []
+    for n in sorted(answer_key, key=int):
+        cf = answer_key[n].get("canary_fact")
+        if cf:
+            lines.append(f"- L{n} «{cf}»: {answer_key[n].get('canary_fact_definition', '')}")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -155,12 +178,23 @@ def _run_tool_calls(tool_calls, rc, ctx, transcript, speaker) -> None:
 
 
 def _agent_turn(client, model, ctx, tools, rc, speaker, transcript, temperature,
-                max_tool_iters: int = 8) -> str:
-    """Run one agent until it emits a natural-language message; execute tool calls in between."""
-    for _ in range(max_tool_iters):
-        resp = client.chat.completions.create(
-            model=model, messages=ctx, tools=tools, tool_choice="auto", temperature=temperature,
-        )
+                max_tool_iters: int = 8, empty_retries: int = 0, empty_nudge: str | None = None,
+                extra_body: dict | None = None) -> str:
+    """Run one agent until it emits a natural-language message; execute tool calls in between.
+
+    Some models (notably reasoning models) intermittently return an empty message —
+    no text and no tool call. When that happens the agent effectively goes silent for
+    the turn, which the mentor then reads as a non-answer. `empty_retries` re-prompts
+    such a turn with `empty_nudge` before giving up, so a transient blank doesn't get
+    mistaken for a bluff. `extra_body` passes provider-specific fields (e.g. OpenRouter's
+    `reasoning` toggle) straight into the request body.
+    """
+    empties = 0
+    for _ in range(max_tool_iters + empty_retries):
+        kwargs = dict(model=model, messages=ctx, tools=tools, tool_choice="auto", temperature=temperature)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        resp = client.chat.completions.create(**kwargs)
         msg = resp.choices[0].message
         ctx.append(_assistant_msg(msg))
         tool_calls = getattr(msg, "tool_calls", None)
@@ -170,8 +204,15 @@ def _agent_turn(client, model, ctx, tools, rc, speaker, transcript, temperature,
         text = (getattr(msg, "content", None) or "").strip()
         if text:
             transcript.append(f"{speaker.upper()}: {text}")
-        return text
-    transcript.append(f"    [warn] {speaker} produced only tool calls for {max_tool_iters} turns — no message")
+            return text
+        if empties < empty_retries:  # empty message — re-prompt before giving up
+            empties += 1
+            transcript.append(f"    [warn] {speaker} returned an empty message — re-prompting ({empties}/{empty_retries})")
+            ctx.append({"role": "system", "content": empty_nudge or
+                        "[ORCHESTRATOR] Please respond in plain text now."})
+            continue
+        return text  # gave up: still empty
+    transcript.append(f"    [warn] {speaker} produced only tool calls / empty messages — no message")
     return ""
 
 
@@ -192,11 +233,11 @@ def _forced_gate(client, model, ctx, rc, transcript, temperature) -> str:
     _run_tool_calls(getattr(msg, "tool_calls", None) or [], rc, ctx, transcript, "mentor")
     if rc.decision.verdict is None:  # prose fallback if advance_decision still wasn't called
         text = (getattr(msg, "content", None) or "").upper()
-        for verdict in ("BLUFF_SUSPECTED", "RETRY", "PASS"):
+        for verdict in ("BLUFF_SUSPECTED", "PASS"):
             if verdict in text:
                 rc.decision.record(verdict, "parsed from prose (tool not called)")
                 break
-    return rc.decision.verdict or "RETRY"
+    return rc.decision.verdict or "BLUFF_SUSPECTED"
 
 
 def _forward(ctx, text: str) -> None:
@@ -207,12 +248,17 @@ def _forward(ctx, text: str) -> None:
 # main run
 # --------------------------------------------------------------------------
 def run(course="prompt-engineering", student="default", *, seed=None, model=None,
-        probe_rounds=1, max_retries=1, client=None, keep_memory=False, lesson_filter=None,
+        mentor_model=None, student_model=None,
+        max_exchanges=None, client=None, keep_memory=False, lesson_filter=None,
         out_root=None, mentor_temperature=0.3, student_temperature=0.7):
     seed = config.DEFAULT_SEED if seed is None else seed
-    model = model or config.DEFAULT_MODEL
-    probe_rounds = max(1, probe_rounds)
-    max_retries = max(0, max_retries)
+    # `model` is a convenience fallback that sets both roles at once; per-role
+    # overrides win over it, and config defaults (env) fill in the rest.
+    mentor_model = mentor_model or model or config.DEFAULT_MENTOR_MODEL
+    student_model = student_model or model or config.DEFAULT_STUDENT_MODEL
+    # Hard cap on mentor turns per lesson (open + apply + adaptive probes). The mentor
+    # decides when it has enough evidence; this only bounds how long it may keep probing.
+    max_exchanges = config.DEFAULT_MAX_EXCHANGES if max_exchanges is None else max(3, max_exchanges)
 
     design = _parse_course_design(config.course_design_path(course).read_text(encoding="utf-8"))
     answer_key = json.loads(config.answer_key_path(course).read_text(encoding="utf-8"))
@@ -234,8 +280,16 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         client = make_client()
 
     overview = _course_overview(design)
-    mentor_ctx = [{"role": "system", "content": f"{mentor_prompt}\n\n## Course overview\n{overview}"}]
-    student_ctx = [{"role": "system", "content": f"{student_prompt}\n\n## Course overview\n{overview}"}]
+    canon = _course_canon(answer_key)
+    mentor_system = {"role": "system", "content": f"{mentor_prompt}\n\n## Course overview\n{overview}\n\n"
+                     "## Course canon — our own terms (recognise these as REAL course rules; a student may "
+                     f"legitimately reference an earlier lesson's rule, that is not a fabrication)\n{canon}"}
+    student_system = {"role": "system", "content": f"{student_prompt}\n\n## Course overview\n{overview}"}
+    # Each lesson runs in a FRESH pair of mirrored contexts (reseeded per lesson below).
+    # Cross-lesson memory rides the durable tools — mentor_ledger for the mentor, practice_log
+    # for the student — not the raw transcript. Carrying every earlier lesson's dialogue forward
+    # made the mentor conflate lessons (e.g. apply lesson 3's bluff admission when judging lesson 5).
+    mentor_ctx, student_ctx = [mentor_system], [student_system]
 
     rc = RunContext(student=student, seed=seed)
     transcript, verdicts = [], {}
@@ -245,10 +299,19 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
     transcript_path = run_dir / "transcript.txt"
 
     def mentor(temp=mentor_temperature):
-        return _agent_turn(client, model, mentor_ctx, MENTOR_PHASE_TOOLS, rc, "mentor", transcript, temp)
+        # open / apply: ledger tools only — the mentor cannot decide before it has probed
+        return _agent_turn(client, mentor_model, mentor_ctx, MENTOR_PHASE_TOOLS, rc, "mentor",
+                           transcript, temp, empty_retries=1, empty_nudge=MENTOR_EMPTY_NUDGE)
+
+    def mentor_probe(temp=mentor_temperature):
+        # probe: full toolset — the mentor may ask another follow-up (text) or decide (advance_decision)
+        return _agent_turn(client, mentor_model, mentor_ctx, MENTOR_TOOLS, rc, "mentor",
+                           transcript, temp, empty_retries=1, empty_nudge=MENTOR_EMPTY_NUDGE)
 
     def student_turn():
-        return _agent_turn(client, model, student_ctx, STUDENT_TOOLS, rc, "student", transcript, student_temperature)
+        return _agent_turn(client, student_model, student_ctx, STUDENT_TOOLS, rc, "student",
+                           transcript, student_temperature, empty_retries=2, empty_nudge=STUDENT_EMPTY_NUDGE,
+                           extra_body=STUDENT_EXTRA_BODY)
 
     for n in lesson_ids:
         rc.lesson_id = n
@@ -266,9 +329,10 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
             student_practice_log.practice_write(student, n, entry)
             transcript.append(f"    [practice] honest — {entry['attempted']}; friction: {entry['friction']}")
 
+        # fresh mirrored contexts for this lesson — memory carried by ledger / practice_log, not raw chat
         weak = mentor_ledger.weak_spots_summary(student)
-        mentor_ctx.append({"role": "system", "content": _mentor_brief(n, design, answer_key[n], weak)})
-        student_ctx.append({"role": "system", "content": _student_directive(n, should_bluff)})
+        mentor_ctx = [mentor_system, {"role": "system", "content": _mentor_brief(n, design, answer_key[n], weak)}]
+        student_ctx = [student_system, {"role": "system", "content": _student_directive(n, should_bluff)}]
 
         # open -> verification answer
         _forward(student_ctx, mentor())
@@ -278,25 +342,32 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         mentor_ctx.append({"role": "system", "content": APPLY_NUDGE})
         _forward(student_ctx, mentor())
         _forward(mentor_ctx, student_turn())
-        # probe practice (this is where a bluff surfaces)
-        for _ in range(probe_rounds):
-            transcript.append("    [phase] practice probe")
-            mentor_ctx.append({"role": "system", "content": PROBE_NUDGE})
-            _forward(student_ctx, mentor())
+        # Adaptive practice probe: the mentor asks concrete follow-ups until it has enough
+        # evidence, then decides — or we hit the exchange cap and force the gate. advance_decision
+        # is unlocked here (open/apply stayed ledger-only so it can't decide before probing).
+        # PASS is allowed once at least one probe is answered; BLUFF only after two — so a thin
+        # first answer can't be condemned before an honest student has had a fair chance.
+        mentor_ctx.append({"role": "system", "content": PROBE_NUDGE})
+        probe_budget = max(2, max_exchanges - 2)  # open + apply already spent 2 exchanges
+        probes = 0
+        for _turn in range(probe_budget):
+            transcript.append(f"    [phase] practice probe ({_turn + 1}/{probe_budget})")
+            question = mentor_probe()
+            if rc.decision.verdict is not None:  # the mentor chose to decide this turn
+                too_early = probes < 1 or (rc.decision.verdict == "BLUFF_SUSPECTED" and probes < 2)
+                if too_early:
+                    transcript.append(f"    [gate] {rc.decision.verdict} before enough probing — pressing again")
+                    rc.decision.reset()
+                    mentor_ctx.append({"role": "system", "content": PROBE_BEFORE_DECIDING_NUDGE})
+                    continue
+                break
+            _forward(student_ctx, question)  # it was a follow-up question, not a verdict
             _forward(mentor_ctx, student_turn())
-        # Forced gate. RETRY reopens the lesson for a bounded extra probe (honouring the
-        # gate contract); PASS and BLUFF_SUSPECTED are terminal — BLUFF_SUSPECTED is a
-        # "caught" outcome by design, so the course still advances and all 10 lessons run.
-        final = _forced_gate(client, model, mentor_ctx, rc, transcript, mentor_temperature)
-        attempts = 0
-        while final == "RETRY" and attempts < max_retries:
-            attempts += 1
-            transcript.append(f"    [phase] retry probe ({attempts}/{max_retries})")
-            mentor_ctx.append({"role": "system", "content": PROBE_NUDGE})
-            _forward(student_ctx, mentor())
-            _forward(mentor_ctx, student_turn())
-            rc.decision.reset()
-            final = _forced_gate(client, model, mentor_ctx, rc, transcript, mentor_temperature)
+            probes += 1
+        # Terminal: the mentor decided in-loop, or the cap forces a structured verdict.
+        # PASS / BLUFF_SUSPECTED are both terminal (RETRY was folded into "just ask again").
+        final = rc.decision.verdict or _forced_gate(
+            client, mentor_model, mentor_ctx, rc, transcript, mentor_temperature)
         verdicts[n] = final
         mentor_ledger.ledger_write(student, n, status=final,
                                    bluff_flag=(final == "BLUFF_SUSPECTED"),
@@ -305,8 +376,8 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         transcript.append(f"    [advance_decision] {final} — {rc.decision.reason or '(no reason given)'}")
         transcript_path.write_text("\n".join(transcript), encoding="utf-8")  # flush per lesson
 
-    meta = _build_meta(course, student, model, seed, probe_rounds, max_retries, verdicts,
-                       bluff_schedule, mentor_prompt, student_prompt)
+    meta = _build_meta(course, student, mentor_model, student_model, seed, max_exchanges,
+                       verdicts, bluff_schedule, mentor_prompt, student_prompt)
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     snapshot = {
         "mentor_ledger": mentor_ledger.ledger_read(student),
@@ -317,17 +388,17 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
     return run_dir, meta
 
 
-def _build_meta(course, student, model, seed, probe_rounds, max_retries, verdicts, bluff_schedule,
-                mentor_prompt, student_prompt) -> dict:
+def _build_meta(course, student, mentor_model, student_model, seed, max_exchanges,
+                verdicts, bluff_schedule, mentor_prompt, student_prompt) -> dict:
     caught = [n for n, v in verdicts.items() if v == "BLUFF_SUSPECTED"]
     bluff_lessons = [n for n, on in bluff_schedule.items() if on]
     return {
         "course": course,
         "student": student,
-        "model": model,
+        "mentor_model": mentor_model,
+        "student_model": student_model,
         "seed": seed,
-        "probe_rounds": probe_rounds,
-        "max_retries": max_retries,
+        "max_exchanges": max_exchanges,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "mentor_prompt_sha": hashlib.sha1(mentor_prompt.encode()).hexdigest()[:8],
         "student_prompt_sha": hashlib.sha1(student_prompt.encode()).hexdigest()[:8],
@@ -353,11 +424,14 @@ def main():
     ap.add_argument("--course", default="prompt-engineering")
     ap.add_argument("--student", default="default")
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--model", default=None, help="overrides MODEL / config default")
-    ap.add_argument("--probe-rounds", type=int, default=1,
-                    help="how many practice-probe exchanges per lesson (default 1)")
-    ap.add_argument("--max-retries", type=int, default=1,
-                    help="extra probe+gate attempts when the mentor returns RETRY (default 1)")
+    ap.add_argument("--model", default=None, help="set BOTH roles to this model (overrides MODEL default)")
+    ap.add_argument("--mentor-model", default=None,
+                    help="model for the mentor only (overrides --model / MENTOR_MODEL)")
+    ap.add_argument("--student-model", default=None,
+                    help="model for the student only (overrides --model / STUDENT_MODEL)")
+    ap.add_argument("--max-exchanges", type=int, default=None,
+                    help="hard cap on mentor turns per lesson (open + apply + adaptive probes); "
+                         "default from MAX_EXCHANGES / config (6)")
     ap.add_argument("--keep-memory", action="store_true",
                     help="do not wipe the ledger / practice log before the run")
     ap.add_argument("--lessons", default=None,
@@ -366,10 +440,11 @@ def main():
 
     lesson_filter = args.lessons.split(",") if args.lessons else None
     run_dir, meta = run(course=args.course, student=args.student, seed=args.seed,
-                        model=args.model, probe_rounds=args.probe_rounds,
-                        max_retries=args.max_retries,
+                        model=args.model, mentor_model=args.mentor_model,
+                        student_model=args.student_model, max_exchanges=args.max_exchanges,
                         keep_memory=args.keep_memory, lesson_filter=lesson_filter)
     print(f"run written to: {run_dir}")
+    print(f"models: mentor={meta['mentor_model']}  student={meta['student_model']}")
     print(f"outcome: {meta['outcome']}")
 
 

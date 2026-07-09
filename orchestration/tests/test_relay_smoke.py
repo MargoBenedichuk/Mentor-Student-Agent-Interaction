@@ -24,7 +24,7 @@ def test_relay_two_lesson_run(student_home, tmp_path):
     client = ScriptedClient(smart_responder)
     run_dir, meta = relay.run(
         course="prompt-engineering", student="default",
-        seed=7, model="fake-model", probe_rounds=1,
+        seed=7, model="fake-model",
         client=client, lesson_filter=["1", "3"], out_root=tmp_path / "logs",
     )
 
@@ -67,18 +67,56 @@ def test_run_is_reproducible_offline(student_home, tmp_path):
         client=client, lesson_filter=["1"], out_root=tmp_path / "logs",
     )
     assert meta["verdicts"] == {"1": "PASS"}
-    assert meta["seed"] == 7 and meta["probe_rounds"] == 1
+    assert meta["seed"] == 7 and meta["max_exchanges"] == 6
 
 
-def test_retry_reopens_then_advances(student_home, tmp_path):
-    """A RETRY verdict reopens the lesson for one more probe, then advances on PASS."""
-    state = {"gate_calls": 0}
+def _is_probe_turn(kw):
+    """A mentor turn during the adaptive probe: advance_decision is available but not forced."""
+    names = {t["function"]["name"] for t in (kw.get("tools") or [])}
+    return "advance_decision" in names and not _is_forced_gate(kw)
+
+
+def test_adaptive_probe_lets_mentor_decide_early(student_home, tmp_path):
+    """In the probe the mentor asks a follow-up, then PASSes once it has evidence — without
+    exhausting the exchange budget or hitting the forced gate."""
+    state = {"probe_turns": 0}
 
     def responder(kw):
         if _is_forced_gate(kw):
-            state["gate_calls"] += 1
-            verdict = "RETRY" if state["gate_calls"] == 1 else "PASS"
-            return call_tool("advance_decision", verdict=verdict, reason="test")
+            return call_tool("advance_decision", verdict="PASS", reason="forced fallback")
+        if _is_probe_turn(kw):
+            state["probe_turns"] += 1
+            if state["probe_turns"] >= 2:              # ask once, then decide
+                return call_tool("advance_decision", verdict="PASS", reason="enough evidence")
+            return say("[mentor] what exactly did you do?")
+        if _is_mentor(kw):                             # open / apply mentor turn
+            return say("[mentor] question")
+        if kw["messages"][-1]["role"] == "tool":
+            return say("[student] answer")
+        return call_tool("practice_read")
+
+    client = ScriptedClient(responder)
+    run_dir, meta = relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
+                              client=client, lesson_filter=["1"], out_root=tmp_path / "logs")
+    txt = (run_dir / "transcript.txt").read_text(encoding="utf-8")
+    assert meta["verdicts"] == {"1": "PASS"}
+    assert "practice probe (2/" in txt                 # took a couple of probe turns
+    assert "practice probe (4/" not in txt             # but stopped early, budget not exhausted
+
+
+def test_adaptive_probe_rejects_premature_bluff(student_home, tmp_path):
+    """A BLUFF called before the mentor has really probed is rejected and the mentor is pushed
+    to press again — an honest student is not condemned on a thin first answer."""
+    state = {"probe_turns": 0}
+
+    def responder(kw):
+        if _is_forced_gate(kw):
+            return call_tool("advance_decision", verdict="BLUFF_SUSPECTED", reason="forced fallback")
+        if _is_probe_turn(kw):
+            state["probe_turns"] += 1
+            if state["probe_turns"] == 1:              # tries to condemn immediately
+                return call_tool("advance_decision", verdict="BLUFF_SUSPECTED", reason="too soon")
+            return say("[mentor] press for specifics")  # then keeps probing until the cap
         if _is_mentor(kw):
             return say("[mentor] question")
         if kw["messages"][-1]["role"] == "tool":
@@ -87,10 +125,59 @@ def test_retry_reopens_then_advances(student_home, tmp_path):
 
     client = ScriptedClient(responder)
     run_dir, meta = relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
-                              client=client, lesson_filter=["1"], max_retries=1, out_root=tmp_path / "logs")
-    assert state["gate_calls"] == 2                     # RETRY forced a second gate
-    assert meta["verdicts"] == {"1": "PASS"}
-    assert "retry probe" in (run_dir / "transcript.txt").read_text(encoding="utf-8").lower()
+                              client=client, lesson_filter=["1"], out_root=tmp_path / "logs")
+    txt = (run_dir / "transcript.txt").read_text(encoding="utf-8")
+    assert "before enough probing — pressing again" in txt   # the guard fired
+    assert meta["verdicts"] == {"1": "BLUFF_SUSPECTED"}      # ultimately still resolved
+
+
+def test_empty_student_turn_is_reprompted(student_home, tmp_path):
+    """A blank student message (no text, no tool call) must be re-prompted, not read as a
+    non-answer — otherwise a transient model blank gets mislabelled as a bluff."""
+    state = {"student_calls": 0}
+
+    def responder(kw):
+        if _is_forced_gate(kw):
+            return call_tool("advance_decision", verdict="PASS", reason="answered after re-prompt")
+        if _is_mentor(kw):
+            return say("[mentor] question")
+        state["student_calls"] += 1
+        if state["student_calls"] == 1:
+            return say("")  # first student turn goes blank
+        return say("[student] real answer")
+
+    client = ScriptedClient(responder)
+    run_dir, meta = relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
+                              client=client, lesson_filter=["1"], out_root=tmp_path / "logs")
+    txt = (run_dir / "transcript.txt").read_text(encoding="utf-8")
+    assert "re-prompting" in txt                       # the guard fired
+    assert "[student] real answer" in txt              # and the student recovered
+    assert meta["verdicts"] == {"1": "PASS"}           # no false bluff from the blank
+    assert meta["mentor_model"] == "fake" and meta["student_model"] == "fake"
+
+
+def test_mentor_context_is_isolated_per_lesson(student_home, tmp_path):
+    """Each lesson runs in a fresh mentor context, so an earlier lesson's dialogue can't bleed
+    into the current judgment (a bluff admission on lesson 3 must not taint lesson 5). No single
+    model call should ever carry two lessons' private briefs at once."""
+    client = ScriptedClient(smart_responder)
+    relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
+              client=client, lesson_filter=["1", "2"], out_root=tmp_path / "logs")
+    for kw in client.calls:
+        blob = " ".join(m.get("content") or "" for m in kw["messages"])
+        carried_two = ("PRIVATE LESSON MATERIAL — lesson 1" in blob
+                       and "PRIVATE LESSON MATERIAL — lesson 2" in blob)
+        assert not carried_two, "mentor context carried two lessons' briefs at once"
+
+
+def test_per_role_models_recorded(student_home, tmp_path):
+    """mentor_model / student_model can differ and are both recorded in meta."""
+    client = ScriptedClient(smart_responder)
+    _, meta = relay.run(course="prompt-engineering", student="default", seed=7,
+                        mentor_model="mentor-x", student_model="student-y",
+                        client=client, lesson_filter=["1"], out_root=tmp_path / "logs")
+    assert meta["mentor_model"] == "mentor-x"
+    assert meta["student_model"] == "student-y"
 
 
 def test_forced_gate_with_extra_tool_calls_keeps_context_valid(student_home, tmp_path):
@@ -110,5 +197,5 @@ def test_forced_gate_with_extra_tool_calls_keeps_context_valid(student_home, tmp
     # two lessons: if the first gate left a tool call unanswered, the invariant check in the
     # fake client would raise on the second lesson's first request.
     _, meta = relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
-                        client=client, lesson_filter=["1", "2"], max_retries=0, out_root=tmp_path / "logs")
+                        client=client, lesson_filter=["1", "2"], out_root=tmp_path / "logs")
     assert meta["verdicts"] == {"1": "PASS", "2": "PASS"}

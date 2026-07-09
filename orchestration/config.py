@@ -27,6 +27,10 @@ PROMPTS_DIR = REPO_ROOT / "prompts"
 # vLLM server, a local model, ...) together with OPENAI_BASE_URL, without
 # touching the code.
 DEFAULT_MODEL = os.environ.get("MODEL", "gpt-4o-mini")
+# Mentor and student can run on different models (e.g. a strong prober for the
+# mentor, a cheaper/more-stable model for the student). Each falls back to MODEL.
+DEFAULT_MENTOR_MODEL = os.environ.get("MENTOR_MODEL") or DEFAULT_MODEL
+DEFAULT_STUDENT_MODEL = os.environ.get("STUDENT_MODEL") or DEFAULT_MODEL
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL") or None
 DEFAULT_MAX_EXCHANGES = int(os.environ.get("MAX_EXCHANGES", "6"))
 DEFAULT_SEED = int(os.environ.get("SEED", "7"))
