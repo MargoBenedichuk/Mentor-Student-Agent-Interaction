@@ -5,6 +5,7 @@ Everything is resolved relative to the repository root (the parent of this
 `python relay.py` from inside `orchestration/` or `python orchestration/relay.py`
 from the repo root.
 """
+import json
 import os
 from pathlib import Path
 
@@ -66,3 +67,17 @@ def bluff_schedule_path(course: str) -> Path:
 
 def logs_dir(course: str) -> Path:
     return course_dir(course) / "logs"
+
+
+# --- shared JSON persistence ----------------------------------------------
+def load_json(path: Path, default: dict) -> dict:
+    """Read a JSON file, or return `default` if it doesn't exist yet / is empty."""
+    if not path.exists():
+        return dict(default)
+    raw = path.read_text(encoding="utf-8").strip()
+    return json.loads(raw) if raw else dict(default)
+
+
+def save_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

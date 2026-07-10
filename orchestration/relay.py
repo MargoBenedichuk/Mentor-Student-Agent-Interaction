@@ -61,7 +61,9 @@ GATE_INSTRUCTION = ("[ORCHESTRATOR] The exchange budget is spent — decide now 
                     "punish a brief-but-specific honest account. BLUFF_SUSPECTED only if the practice account is "
                     "missing, generic ('it went smoothly', 'nothing major stood out'), evasive, contradicts the "
                     "canary fact, or just recycles the lesson's own example. Also pass weak_spots: 1–2 short phrases "
-                    "naming what the student was shaky on, so you can recall them in later lessons.")
+                    "naming what the student was shaky on, so you can recall them in later lessons. Optionally pass "
+                    "reflection: one honest sentence on what almost got missed or what specific answer tipped your "
+                    "judgment either way.")
 
 
 @dataclass
@@ -106,19 +108,19 @@ def _course_canon(answer_key: dict) -> str:
 # --------------------------------------------------------------------------
 # per-lesson private material
 # --------------------------------------------------------------------------
-def _mentor_brief(n: str, lessons: dict, ak: dict, weak: str) -> str:
-    points = "\n".join(f"  - {p}" for p in ak.get("expected_application_points", []))
+def _mentor_brief(n: str, lessons: dict, answer_key_entry: dict, weak: str) -> str:
+    points = "\n".join(f"  - {p}" for p in answer_key_entry.get("expected_application_points", []))
     brief = (
         f"[PRIVATE LESSON MATERIAL — lesson {n}: {lessons[n]['title']}]\n"
         "Teach and then test this lesson. Deliver the concept and questions in your own "
         "words; never paste the answer key.\n\n"
         f"LESSON (concept + the questions you will ask):\n{lessons[n]['body']}\n\n"
         "ANSWER KEY (PRIVATE — the student must never see this):\n"
-        f"- canary fact: {ak.get('canary_fact')} — {ak.get('canary_fact_definition')}\n"
+        f"- canary fact: {answer_key_entry.get('canary_fact')} — {answer_key_entry.get('canary_fact_definition')}\n"
         f"- a genuine, practised answer shows:\n{points}\n"
     )
-    if ak.get("bluff_note"):
-        brief += f"- watch-out: {ak['bluff_note']}\n"
+    if answer_key_entry.get("bluff_note"):
+        brief += f"- watch-out: {answer_key_entry['bluff_note']}\n"
     brief += f"\nWEAK SPOTS you noted in earlier lessons: {weak}\n"
     brief += (
         "\nNow OPEN the lesson: 2–4 sentences explaining the concept, then ask your "
@@ -226,14 +228,13 @@ def _agent_turn(client, model, ctx, tools, rc, speaker, transcript, temperature,
 def _forced_gate(client, model, ctx, rc, transcript, temperature) -> str:
     """Force a structured advance_decision call so every lesson yields a verdict."""
     ctx.append({"role": "system", "content": GATE_INSTRUCTION})
-    choice = {"type": "function", "function": {"name": "advance_decision"}}
+    kwargs = dict(model=model, messages=ctx, tools=MENTOR_TOOLS, temperature=temperature)
     try:
         resp = client.chat.completions.create(
-            model=model, messages=ctx, tools=MENTOR_TOOLS, tool_choice=choice, temperature=temperature)
+            tool_choice={"type": "function", "function": {"name": "advance_decision"}}, **kwargs)
     except Exception:  # some endpoints reject a forced function choice — fall back to auto
         transcript.append("    [warn] forced tool_choice rejected by endpoint — retrying with tool_choice=auto")
-        resp = client.chat.completions.create(
-            model=model, messages=ctx, tools=MENTOR_TOOLS, tool_choice="auto", temperature=temperature)
+        resp = client.chat.completions.create(tool_choice="auto", **kwargs)
     msg = resp.choices[0].message
     ctx.append(_assistant_msg(msg))
     # Answer EVERY tool call the model made (the auto fallback may also emit ledger_*).
@@ -265,7 +266,7 @@ def _forward(ctx, text: str) -> None:
 # --------------------------------------------------------------------------
 def run(course="prompt-engineering", student="default", *, seed=None, model=None,
         mentor_model=None, student_model=None,
-        max_exchanges=None, client=None, keep_memory=False, lesson_filter=None,
+        max_exchanges=None, client=None, reset_memory=False, lesson_filter=None,
         out_root=None, mentor_temperature=0.3, student_temperature=0.7):
     seed = config.DEFAULT_SEED if seed is None else seed
     # `model` is a convenience fallback that sets both roles at once; per-role
@@ -287,7 +288,11 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         wanted = {str(x) for x in lesson_filter}
         lesson_ids = [n for n in lesson_ids if n in wanted]
 
-    if not keep_memory:
+    # The ledger and practice log persist across separate runs for the same student by
+    # default — a student retaking the course should have prior weak spots recalled, not
+    # start from zero each time (see mentor_ledger.py's module docstring). Pass
+    # reset_memory=True (CLI: --reset) for a clean slate, e.g. when comparing seeds in QA.
+    if reset_memory:
         mentor_ledger.reset(student)
         student_practice_log.reset(student)
 
@@ -313,15 +318,13 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
     out_root = Path(out_root) if out_root else config.logs_dir(course)
     run_dir = _next_run_dir(out_root)
     transcript_path = run_dir / "transcript.txt"
+    flushed = 0  # index into `transcript` already written to disk, for incremental (not O(n^2)) flushing
 
-    def mentor(temp=mentor_temperature):
-        # open / apply: ledger tools only — the mentor cannot decide before it has probed
-        return _agent_turn(client, mentor_model, mentor_ctx, MENTOR_PHASE_TOOLS, rc, "mentor",
-                           transcript, temp, empty_retries=1, empty_nudge=MENTOR_EMPTY_NUDGE)
-
-    def mentor_probe(temp=mentor_temperature):
-        # probe: full toolset — the mentor may ask another follow-up (text) or decide (advance_decision)
-        return _agent_turn(client, mentor_model, mentor_ctx, MENTOR_TOOLS, rc, "mentor",
+    def mentor(can_decide: bool = False, temp=mentor_temperature):
+        # open / apply: ledger tools only, the mentor cannot decide before it has probed.
+        # probe: full toolset, the mentor may ask another follow-up (text) or decide (advance_decision).
+        tools = MENTOR_TOOLS if can_decide else MENTOR_PHASE_TOOLS
+        return _agent_turn(client, mentor_model, mentor_ctx, tools, rc, "mentor",
                            transcript, temp, empty_retries=1, empty_nudge=MENTOR_EMPTY_NUDGE)
 
     def student_turn():
@@ -350,10 +353,8 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         mentor_ctx = [mentor_system, {"role": "system", "content": _mentor_brief(n, design, answer_key[n], weak)}]
         student_ctx = [student_system, {"role": "system", "content": _student_directive(n, should_bluff)}]
 
-        # open -> verification answer
         _forward(student_ctx, mentor())
         _forward(mentor_ctx, student_turn())
-        # apply
         transcript.append("    [phase] application")
         mentor_ctx.append({"role": "system", "content": APPLY_NUDGE})
         _forward(student_ctx, mentor())
@@ -368,7 +369,7 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         probes = 0
         for _turn in range(probe_budget):
             transcript.append(f"    [phase] practice probe ({_turn + 1}/{probe_budget})")
-            question = mentor_probe()
+            question = mentor(can_decide=True)
             if rc.decision.verdict is not None:  # the mentor chose to decide this turn
                 too_early = probes < 1 or (rc.decision.verdict == "BLUFF_SUSPECTED" and probes < 2)
                 if too_early:
@@ -385,22 +386,27 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         final = rc.decision.verdict or _forced_gate(
             client, mentor_model, mentor_ctx, rc, transcript, mentor_temperature)
         verdicts[n] = final
+        # weak_spots/reflection are written unconditionally (not "if truthy else leave untouched"):
+        # a decision was just finalized this lesson, so even an empty list is the authoritative,
+        # current answer — not "no update", which would leave a stale weak_spot from a retry stuck.
         mentor_ledger.ledger_write(student, n, status=final,
                                    bluff_flag=(final == "BLUFF_SUSPECTED"),
-                                   weak_spots=(rc.decision.weak_spots or None),
-                                   evidence=rc.decision.reason or None)
+                                   weak_spots=rc.decision.weak_spots,
+                                   evidence=rc.decision.reason or None,
+                                   reflection=rc.decision.reflection or None)
         transcript.append(f"    [advance_decision] {final} — {rc.decision.reason or '(no reason given)'}")
-        transcript_path.write_text("\n".join(transcript), encoding="utf-8")  # flush per lesson
+        new_lines = transcript[flushed:]
+        with transcript_path.open("a", encoding="utf-8") as f:
+            f.write(("\n" if flushed else "") + "\n".join(new_lines))
+        flushed = len(transcript)
 
     meta = _build_meta(course, student, mentor_model, student_model, seed, max_exchanges,
                        verdicts, bluff_schedule, mentor_prompt, student_prompt)
-    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    snapshot = {
+    config.save_json(run_dir / "meta.json", meta)
+    config.save_json(run_dir / "memory_snapshot.json", {
         "mentor_ledger": mentor_ledger.ledger_read(student),
         "student_practice_log": student_practice_log.practice_read(student),
-    }
-    (run_dir / "memory_snapshot.json").write_text(
-        json.dumps(snapshot, indent=2, ensure_ascii=False), encoding="utf-8")
+    })
     return run_dir, meta
 
 
@@ -448,8 +454,8 @@ def main():
     ap.add_argument("--max-exchanges", type=int, default=None,
                     help="hard cap on mentor turns per lesson (open + apply + adaptive probes); "
                          "default from MAX_EXCHANGES / config (6)")
-    ap.add_argument("--keep-memory", action="store_true",
-                    help="do not wipe the ledger / practice log before the run")
+    ap.add_argument("--reset", action="store_true",
+                    help="wipe the ledger / practice log before the run (default: persist across runs)")
     ap.add_argument("--lessons", default=None,
                     help="comma-separated subset of lesson ids to run, e.g. 1,3")
     args = ap.parse_args()
@@ -458,7 +464,7 @@ def main():
     run_dir, meta = run(course=args.course, student=args.student, seed=args.seed,
                         model=args.model, mentor_model=args.mentor_model,
                         student_model=args.student_model, max_exchanges=args.max_exchanges,
-                        keep_memory=args.keep_memory, lesson_filter=lesson_filter)
+                        reset_memory=args.reset, lesson_filter=lesson_filter)
     print(f"run written to: {run_dir}")
     print(f"models: mentor={meta['mentor_model']}  student={meta['student_model']}")
     print(f"outcome: {meta['outcome']}")

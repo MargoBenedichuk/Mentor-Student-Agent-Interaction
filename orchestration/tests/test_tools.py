@@ -15,13 +15,26 @@ def test_ledger_roundtrip(student_home):
     s = "tester"
     mentor_ledger.reset(s)
     assert mentor_ledger.ledger_read(s)["lessons"] == {}
-    mentor_ledger.ledger_write(s, 1, status="PASS", weak_spots=["ordering"], evidence="split into 3")
+    mentor_ledger.ledger_write(s, 1, status="PASS", weak_spots=["ordering"], evidence="split into 3",
+                               reflection="the redo detail is what convinced me")
     mentor_ledger.ledger_write(s, 2, status="BLUFF_SUSPECTED", bluff_flag=True)
     data = mentor_ledger.ledger_read(s)
     assert data["lessons"]["1"]["status"] == "PASS"
     assert data["lessons"]["1"]["weak_spots"] == ["ordering"]
+    assert data["lessons"]["1"]["reflection"] == "the redo detail is what convinced me"
     assert data["lessons"]["2"]["bluff_flag"] is True
     assert "L1: ordering" in mentor_ledger.weak_spots_summary(s)
+
+
+def test_ledger_write_weak_spots_accepts_explicit_empty_list(student_home):
+    """An explicit [] must overwrite a prior weak_spots list (a lesson can be cleanly
+    passed with nothing shaky left) — distinct from omitting the field entirely."""
+    s = "tester"
+    mentor_ledger.reset(s)
+    mentor_ledger.ledger_write(s, 1, status="PASS", weak_spots=["ordering"])
+    mentor_ledger.ledger_write(s, 1, status="PASS", weak_spots=[])
+    assert mentor_ledger.ledger_read(s)["lessons"]["1"]["weak_spots"] == []
+    assert mentor_ledger.weak_spots_summary(s) == "(none recorded yet)"
 
 
 def test_practice_log_roundtrip(student_home):
@@ -96,6 +109,15 @@ def test_course_design_parses_ten_lessons():
     assert len(lessons) == 10
     assert lessons["1"]["title"].lower().startswith("clear")
     assert "bluff" not in lessons["3"]["title"].lower()  # annotation stripped from title
+
+
+def test_mentor_phase_tools_exclude_advance_decision():
+    """The open/apply phases must not offer advance_decision by name, however
+    MENTOR_TOOLS happens to be ordered — a positional slice would silently drift."""
+    from tools import MENTOR_PHASE_TOOLS, MENTOR_TOOLS
+    phase_names = {t["function"]["name"] for t in MENTOR_PHASE_TOOLS}
+    assert "advance_decision" not in phase_names
+    assert phase_names == {t["function"]["name"] for t in MENTOR_TOOLS} - {"advance_decision"}
 
 
 def test_prompts_are_not_stubs():

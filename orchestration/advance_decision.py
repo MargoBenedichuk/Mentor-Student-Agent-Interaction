@@ -24,18 +24,18 @@ class AdvanceDecision:
     """Per-lesson holder for the mentor's gate verdict."""
 
     def __init__(self):
-        self.verdict = None
-        self.reason = ""
-        self.weak_spots = []
+        self.reset()
 
     def reset(self):
         self.verdict = None
         self.reason = ""
         self.weak_spots = []
+        self.reflection = ""
 
-    def record(self, verdict: str, reason: str = "", weak_spots=None) -> dict:
+    def record(self, verdict: str, reason: str = "", weak_spots=None, reflection: str = "") -> dict:
         self.verdict = validate(verdict)
         self.reason = reason or ""
         self.weak_spots = list(weak_spots) if weak_spots else []
+        self.reflection = reflection or ""
         return {"ok": True, "verdict": self.verdict, "reason": self.reason,
-                "weak_spots": self.weak_spots}
+                "weak_spots": self.weak_spots, "reflection": self.reflection}

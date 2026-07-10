@@ -47,6 +47,10 @@ MENTOR_TOOLS = [
                     "reason": {"type": "string", "description": "One sentence justifying the verdict."},
                     "weak_spots": {"type": "array", "items": {"type": "string"},
                                     "description": "1-2 short phrases naming what the student was shaky on, for recall in later lessons."},
+                    "reflection": {"type": "string",
+                                    "description": "Optional: one sentence on what almost got missed, or what "
+                                                    "specific answer tipped your judgment — a self-check on your "
+                                                    "own reasoning, not a restatement of the reason."},
                 },
                 "required": ["verdict"],
                 "additionalProperties": False,
@@ -57,7 +61,7 @@ MENTOR_TOOLS = [
 
 # During the lesson dialogue the mentor gets ledger tools only; advance_decision is
 # reserved for the forced gate at the end so a structured verdict is always recorded.
-MENTOR_PHASE_TOOLS = MENTOR_TOOLS[:2]
+MENTOR_PHASE_TOOLS = [t for t in MENTOR_TOOLS if t["function"]["name"] != "advance_decision"]
 
 STUDENT_TOOLS = [
     {
@@ -84,7 +88,8 @@ def dispatch(name: str, args: dict, rc) -> dict:
     if name == "ledger_write":
         return ledger_write(rc.student, rc.lesson_id, **args)
     if name == "advance_decision":
-        return rc.decision.record(args.get("verdict"), args.get("reason", ""), args.get("weak_spots"))
+        return rc.decision.record(args.get("verdict"), args.get("reason", ""),
+                                  args.get("weak_spots"), args.get("reflection", ""))
     if name == "practice_read":
         lesson_id = args.get("lesson_id", rc.lesson_id)
         entry = practice_read(rc.student, lesson_id)

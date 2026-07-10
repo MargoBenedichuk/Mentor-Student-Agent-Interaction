@@ -218,6 +218,35 @@ def test_forced_gate_prose_fallback_raises_instead_of_misclassifying(student_hom
             assert "lesson 1" in str(exc)
 
 
+def test_memory_persists_across_runs_by_default(student_home, tmp_path):
+    """A student re-taking the course should have earlier weak_spots recalled, not start
+    from zero every run — the ledger must NOT be reset unless reset_memory=True."""
+    client = ScriptedClient(smart_responder)
+    relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
+              client=client, lesson_filter=["1"], out_root=tmp_path / "logs")
+    first = mentor_ledger.ledger_read("default")
+    assert "1" in first["lessons"]
+
+    client2 = ScriptedClient(smart_responder)
+    relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
+              client=client2, lesson_filter=["2"], out_root=tmp_path / "logs")
+    second = mentor_ledger.ledger_read("default")
+    assert "1" in second["lessons"] and "2" in second["lessons"]  # lesson 1 survived
+
+
+def test_reset_memory_wipes_ledger_before_run(student_home, tmp_path):
+    client = ScriptedClient(smart_responder)
+    relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
+              client=client, lesson_filter=["1"], out_root=tmp_path / "logs")
+    assert "1" in mentor_ledger.ledger_read("default")["lessons"]
+
+    client2 = ScriptedClient(smart_responder)
+    relay.run(course="prompt-engineering", student="default", seed=7, model="fake",
+              client=client2, lesson_filter=["2"], out_root=tmp_path / "logs", reset_memory=True)
+    after_reset = mentor_ledger.ledger_read("default")
+    assert "1" not in after_reset["lessons"] and "2" in after_reset["lessons"]
+
+
 def test_forced_gate_with_extra_tool_calls_keeps_context_valid(student_home, tmp_path):
     """Gate that emits ledger_write alongside advance_decision must answer BOTH tool calls,
     or the reused mentor context corrupts and the next lesson's request fails."""
