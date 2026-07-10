@@ -50,8 +50,10 @@ MENTOR_EMPTY_NUDGE = ("[ORCHESTRATOR] You didn't produce a message. Ask your que
 # The student plays a simple role — recount its practice log, be a believable learner — and does
 # not need chain-of-thought. Disabling reasoning stops deepseek-style models from returning an
 # empty content field (the blank-outs that got honest students mislabelled as bluffs) and is
-# cheaper/faster. Harmless for models without a reasoning mode. The mentor keeps its reasoning.
-STUDENT_EXTRA_BODY = {"reasoning": {"enabled": False}}
+# cheaper/faster. This is an OpenRouter-specific body field: the default target (plain OpenAI,
+# no OPENAI_BASE_URL set) rejects unrecognized top-level request fields, so only send it when
+# the user has pointed at a custom endpoint. The mentor keeps its reasoning.
+STUDENT_EXTRA_BODY = {"reasoning": {"enabled": False}} if config.OPENAI_BASE_URL else None
 GATE_INSTRUCTION = ("[ORCHESTRATOR] The exchange budget is spent — decide now with advance_decision (PASS or "
                     "BLUFF_SUSPECTED). PASS if the student applied the rule correctly AND their account of practice "
                     "named a specific thing they did and a specific difficulty or redo consistent with a real "
@@ -200,6 +202,11 @@ def _agent_turn(client, model, ctx, tools, rc, speaker, transcript, temperature,
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
             _run_tool_calls(tool_calls, rc, ctx, transcript, speaker)
+            if rc.decision.verdict is not None:
+                # advance_decision was one of the calls — the lesson is decided, stop asking
+                # this turn to also produce a message (it previously kept looping and could
+                # fire the empty-message nudge right after a verdict was already recorded).
+                return ""
             continue  # let the model speak after seeing the tool results
         text = (getattr(msg, "content", None) or "").strip()
         if text:
@@ -224,6 +231,7 @@ def _forced_gate(client, model, ctx, rc, transcript, temperature) -> str:
         resp = client.chat.completions.create(
             model=model, messages=ctx, tools=MENTOR_TOOLS, tool_choice=choice, temperature=temperature)
     except Exception:  # some endpoints reject a forced function choice — fall back to auto
+        transcript.append("    [warn] forced tool_choice rejected by endpoint — retrying with tool_choice=auto")
         resp = client.chat.completions.create(
             model=model, messages=ctx, tools=MENTOR_TOOLS, tool_choice="auto", temperature=temperature)
     msg = resp.choices[0].message
@@ -233,11 +241,19 @@ def _forced_gate(client, model, ctx, rc, transcript, temperature) -> str:
     _run_tool_calls(getattr(msg, "tool_calls", None) or [], rc, ctx, transcript, "mentor")
     if rc.decision.verdict is None:  # prose fallback if advance_decision still wasn't called
         text = (getattr(msg, "content", None) or "").upper()
-        for verdict in ("BLUFF_SUSPECTED", "PASS"):
-            if verdict in text:
-                rc.decision.record(verdict, "parsed from prose (tool not called)")
-                break
-    return rc.decision.verdict or "BLUFF_SUSPECTED"
+        # Whole-word match only, and only when exactly one verdict word appears — a plain
+        # substring scan misreads "not a BLUFF_SUSPECTED case, clearly a PASS" as BLUFF_SUSPECTED
+        # because that word happens to be checked first. Ambiguous or absent text must not guess:
+        # silently defaulting to BLUFF_SUSPECTED is a false bluff accusation with no real signal.
+        found = set(re.findall(r"\bPASS\b|\bBLUFF_SUSPECTED\b", text))
+        if len(found) == 1:
+            rc.decision.record(found.pop(), "parsed from prose (tool not called)")
+            transcript.append("    [warn] advance_decision not called — verdict parsed from prose")
+        else:
+            raise RuntimeError(
+                f"lesson {rc.lesson_id}: could not determine a verdict "
+                f"(forced tool_choice failed and prose was ambiguous: {text!r})")
+    return rc.decision.verdict
 
 
 def _forward(ctx, text: str) -> None:

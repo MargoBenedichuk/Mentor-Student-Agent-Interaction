@@ -225,4 +225,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Simulation run logs (throwaway); commit a chosen best run with `git add -f`
+courses/*/logs/run_*/
 

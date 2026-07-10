@@ -24,7 +24,7 @@ MENTOR_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "status": {"type": "string", "description": "PASS / RETRY / BLUFF_SUSPECTED / in_progress"},
+                    "status": {"type": "string", "description": "PASS / BLUFF_SUSPECTED / in_progress"},
                     "weak_spots": {"type": "array", "items": {"type": "string"},
                                     "description": "Short phrases naming what the student was shaky on."},
                     "evidence": {"type": "string", "description": "The concrete thing the student said that supports your read."},

@@ -180,6 +180,44 @@ def test_per_role_models_recorded(student_home, tmp_path):
     assert meta["student_model"] == "student-y"
 
 
+def _raise_on_forced_choice(prose_text):
+    """Simulate an endpoint that rejects forced tool_choice: raises on the forced call,
+    then returns a prose-only message (no tool call) on the tool_choice='auto' fallback."""
+    def responder(kw):
+        if _is_forced_gate(kw):
+            raise RuntimeError("simulated: this endpoint rejects a forced function choice")
+        return say(prose_text)
+    return responder
+
+
+def test_forced_gate_prose_fallback_resolves_unambiguous_verdict(student_home):
+    """When exactly one verdict word appears in the fallback prose, it's recorded."""
+    client = ScriptedClient(_raise_on_forced_choice(
+        "The student clearly demonstrated understanding — this is a PASS."))
+    rc = relay.RunContext(student="default", seed=7, lesson_id="1")
+    verdict = relay._forced_gate(client, "fake-model", [], rc, [], 0.3)
+    assert verdict == "PASS"
+
+
+def test_forced_gate_prose_fallback_raises_instead_of_misclassifying(student_home):
+    """Regression guard for the original bug: a first-match substring scan checked
+    BLUFF_SUSPECTED before PASS, so a negated mention ('not a BLUFF_SUSPECTED case,
+    clearly a PASS') was misread as a bluff accusation. Since both words are literally
+    present, the fix can't correctly resolve this from text alone either — but it must
+    fail loudly instead of silently recording the wrong (or any default) verdict."""
+    for prose in (
+        "This is not a BLUFF_SUSPECTED case — clearly a PASS.",  # both words present (negation)
+        "I think the student did fine overall.",                  # neither word present
+    ):
+        client = ScriptedClient(_raise_on_forced_choice(prose))
+        rc = relay.RunContext(student="default", seed=7, lesson_id="1")
+        try:
+            relay._forced_gate(client, "fake-model", [], rc, [], 0.3)
+            assert False, f"expected RuntimeError for ambiguous prose: {prose!r}"
+        except RuntimeError as exc:
+            assert "lesson 1" in str(exc)
+
+
 def test_forced_gate_with_extra_tool_calls_keeps_context_valid(student_home, tmp_path):
     """Gate that emits ledger_write alongside advance_decision must answer BOTH tool calls,
     or the reused mentor context corrupts and the next lesson's request fails."""
