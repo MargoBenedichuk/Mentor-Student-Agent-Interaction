@@ -60,14 +60,26 @@ def test_relay_two_lesson_run(student_home, tmp_path):
 
 
 def test_run_is_reproducible_offline(student_home, tmp_path):
-    """Same seed + same fake client => identical practice content injected."""
-    client = ScriptedClient(smart_responder)
-    _, meta = relay.run(
-        course="prompt-engineering", student="default", seed=7, model="fake",
-        client=client, lesson_filter=["1"], out_root=tmp_path / "logs",
-    )
-    assert meta["verdicts"] == {"1": "PASS"}
-    assert meta["seed"] == 7 and meta["max_exchanges"] == 6
+    """Same seed + same fake client => byte-identical transcript and verdicts across two
+    independent runs. reset_memory=True on both so persisted weak_spots from run A (memory
+    now survives across runs by default) can't leak into run B's mentor brief and desync them."""
+    def make_run(out_name):
+        client = ScriptedClient(smart_responder)
+        return relay.run(
+            course="prompt-engineering", student="default", seed=7, model="fake",
+            client=client, lesson_filter=["1"], out_root=tmp_path / out_name,
+            reset_memory=True,
+        )
+
+    run_dir_a, meta_a = make_run("logs_a")
+    run_dir_b, meta_b = make_run("logs_b")
+
+    transcript_a = (run_dir_a / "transcript.txt").read_text(encoding="utf-8")
+    transcript_b = (run_dir_b / "transcript.txt").read_text(encoding="utf-8")
+    assert transcript_a == transcript_b
+
+    assert meta_a["verdicts"] == meta_b["verdicts"] == {"1": "PASS"}
+    assert meta_a["seed"] == 7 and meta_a["max_exchanges"] == 6
 
 
 def _is_probe_turn(kw):
