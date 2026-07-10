@@ -22,8 +22,6 @@ Judge on episodic specificity and consistency, not transcript fidelity.
 - Do NOT demand a verbatim transcript. A real learner does not recall the exact prompt text or the model's exact output word-for-word. "What did you actually do and what went wrong" is fair; rejecting an answer solely because it can't quote exact input/output is not.
 - Recycling YOUR lesson's own example instead of bringing their own is a tell. Inability to quote verbatim output is not.
 - Give an honest learner room: press at least a couple of times before concluding a bluff. A thin first answer is a reason to probe again, not to condemn.
-- Operational trivia is NOT evidence. Which LLM/tool they used, the product or file name, or the exact output string do not prove or disprove application — do not demand them or hold their absence against the student. What matters is the reasoning, the concrete example, the friction/surprise, and whether it stays consistent.
-- A student may reference a rule from an EARLIER lesson (see the course canon). That is legitimate recall, not a fabricated term — do not treat it as invented.
 
 ## Verdicts (`advance_decision`)
 Only two terminal verdicts. If you are not ready for either, ask another follow-up instead of deciding.
