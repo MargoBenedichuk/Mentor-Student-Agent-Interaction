@@ -35,6 +35,15 @@ from advance_decision import AdvanceDecision
 from practice_simulator import simulate_practice
 from tools import MENTOR_TOOLS, MENTOR_PHASE_TOOLS, STUDENT_TOOLS, dispatch
 
+GREETING_MENTOR_NUDGE = ("[ORCHESTRATOR] This is the very first moment of the conversation. Greet the student "
+               "warmly and briefly (1–2 short sentences) and ask something light — how they're doing, or how "
+               "their practice has been going. Do NOT mention any lesson, rule, concept, or task yet; opening "
+               "cold with a lesson loses people.")
+GREETING_STUDENT_NUDGE = ("[ORCHESTRATOR] The mentor is just saying hello. Reply warmly in ONE short sentence. "
+               "Don't bring up any practice details yet.")
+OPEN_NUDGE = ("[ORCHESTRATOR] Now bring up today's topic conversationally: a short friendly transition, then "
+               "introduce the idea in 1–2 sentences and ask ONE verification question. Keep it brief and human — "
+               "do NOT announce 'Lesson N' and do NOT dump the concept plus a task in one message.")
 APPLY_NUDGE = ("[ORCHESTRATOR] Now pose this lesson's transfer scenario and require the student to APPLY "
                "the rule to it. One message. Do not decide the lesson yet.")
 PROBE_NUDGE = ("[ORCHESTRATOR] Probe the student's ACTUAL practice. Each turn do ONE of two things: ask a "
@@ -122,10 +131,8 @@ def _mentor_brief(n: str, lessons: dict, answer_key_entry: dict, weak: str) -> s
     if answer_key_entry.get("bluff_note"):
         brief += f"- watch-out: {answer_key_entry['bluff_note']}\n"
     brief += f"\nWEAK SPOTS you noted in earlier lessons: {weak}\n"
-    brief += (
-        "\nNow OPEN the lesson: 2–4 sentences explaining the concept, then ask your "
-        "verification question. One message. Do NOT call advance_decision yet."
-    )
+    brief += ("\nYou will greet/segue first (the orchestrator will prompt you); do NOT dump the "
+              "concept and a task in your opening message, and do NOT call advance_decision yet.")
     return brief
 
 
@@ -183,7 +190,7 @@ def _run_tool_calls(tool_calls, rc, ctx, transcript, speaker) -> None:
 
 def _agent_turn(client, model, ctx, tools, rc, speaker, transcript, temperature,
                 max_tool_iters: int = 8, empty_retries: int = 0, empty_nudge: str | None = None,
-                extra_body: dict | None = None) -> str:
+                extra_body: dict | None = None, max_tokens: int | None = None) -> str:
     """Run one agent until it emits a natural-language message; execute tool calls in between.
 
     Some models (notably reasoning models) intermittently return an empty message —
@@ -198,8 +205,18 @@ def _agent_turn(client, model, ctx, tools, rc, speaker, transcript, temperature,
         kwargs = dict(model=model, messages=ctx, tools=tools, tool_choice="auto", temperature=temperature)
         if extra_body:
             kwargs["extra_body"] = extra_body
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
         resp = client.chat.completions.create(**kwargs)
-        msg = resp.choices[0].message
+        choice = resp.choices[0]
+        msg = choice.message
+        if (max_tokens and getattr(choice, "finish_reason", None) == "length"
+                and getattr(msg, "tool_calls", None)):
+            # the cap truncated a tool call's JSON args — redo this turn uncapped so they
+            # parse (a broken tool call would corrupt the exchange)
+            transcript.append(f"    [warn] {speaker} tool call hit the token cap — retrying uncapped")
+            resp = client.chat.completions.create(**{k: v for k, v in kwargs.items() if k != "max_tokens"})
+            msg = resp.choices[0].message
         ctx.append(_assistant_msg(msg))
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
@@ -325,12 +342,13 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         # probe: full toolset, the mentor may ask another follow-up (text) or decide (advance_decision).
         tools = MENTOR_TOOLS if can_decide else MENTOR_PHASE_TOOLS
         return _agent_turn(client, mentor_model, mentor_ctx, tools, rc, "mentor",
-                           transcript, temp, empty_retries=1, empty_nudge=MENTOR_EMPTY_NUDGE)
+                           transcript, temp, empty_retries=1, empty_nudge=MENTOR_EMPTY_NUDGE,
+                           max_tokens=config.DEFAULT_MENTOR_MAX_TOKENS)
 
     def student_turn():
         return _agent_turn(client, student_model, student_ctx, STUDENT_TOOLS, rc, "student",
                            transcript, student_temperature, empty_retries=2, empty_nudge=STUDENT_EMPTY_NUDGE,
-                           extra_body=STUDENT_EXTRA_BODY)
+                           extra_body=STUDENT_EXTRA_BODY, max_tokens=config.DEFAULT_STUDENT_MAX_TOKENS)
 
     for n in lesson_ids:
         rc.lesson_id = n
@@ -353,6 +371,25 @@ def run(course="prompt-engineering", student="default", *, seed=None, model=None
         mentor_ctx = [mentor_system, {"role": "system", "content": _mentor_brief(n, design, answer_key[n], weak)}]
         student_ctx = [student_system, {"role": "system", "content": _student_directive(n, should_bluff)}]
 
+        # Warm start — never open cold with a lesson + task. Greet on the very first lesson,
+        # then always ease into the topic conversationally (the mentor won't dump concept+task).
+        if n == lesson_ids[0]:
+            # A one-off rapport turn on the very first lesson only. It is deliberately NOT
+            # counted against max_exchanges (that cap governs probing, not the hello), so the
+            # first lesson runs one mentor turn longer than the others by design.
+            transcript.append("    [phase] greeting")
+            greet_m = {"role": "system", "content": GREETING_MENTOR_NUDGE}
+            greet_s = {"role": "system", "content": GREETING_STUDENT_NUDGE}
+            mentor_ctx.append(greet_m)
+            student_ctx.append(greet_s)
+            _forward(student_ctx, mentor())
+            _forward(mentor_ctx, student_turn())
+            # one-shot nudges: drop them so they don't keep telling the student "don't
+            # discuss practice yet" (and the mentor "don't mention the lesson") all lesson.
+            mentor_ctx.remove(greet_m)
+            student_ctx.remove(greet_s)
+        transcript.append("    [phase] opening")
+        mentor_ctx.append({"role": "system", "content": OPEN_NUDGE})
         _forward(student_ctx, mentor())
         _forward(mentor_ctx, student_turn())
         transcript.append("    [phase] application")

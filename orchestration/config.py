@@ -35,6 +35,20 @@ DEFAULT_STUDENT_MODEL = os.environ.get("STUDENT_MODEL") or DEFAULT_MODEL
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL") or None
 DEFAULT_MAX_EXCHANGES = int(os.environ.get("MAX_EXCHANGES", "6"))
 DEFAULT_SEED = int(os.environ.get("SEED", "7"))
+# Reply-length caps (a real user texts short lines, not essays). The prompts do the
+# real work; the student cap is a backstop so a verbose model can't ramble into a wall
+# of text. The MENTOR is uncapped by default: capping it risks truncating the JSON of
+# its advance_decision tool call. Empty / non-numeric / <=0 all mean "no cap".
+def _cap(value: str):
+    try:
+        n = int((value or "").strip())
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+DEFAULT_STUDENT_MAX_TOKENS = _cap(os.environ.get("STUDENT_MAX_TOKENS", "200"))
+DEFAULT_MENTOR_MAX_TOKENS = _cap(os.environ.get("MENTOR_MAX_TOKENS", ""))
 
 
 def course_dir(course: str) -> Path:
