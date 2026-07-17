@@ -1,0 +1,53 @@
+/* Print styling for assignment_solution.md -> PDF (see build_solution_pdf.sh).
+   Overrides pandoc's default HTML styles: tighter, denser, letter-sized, so the
+   solution stays within 2 pages. */
+
+@page { size: letter; margin: 0.85in 0.95in; }
+
+html { font-size: 10.5pt; }
+
+body {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  font-family: "Times New Roman", Times, serif;
+  font-size: 10.5pt;
+  line-height: 1.4;
+  color: #000;
+  hyphens: auto;
+}
+
+header#title-block-header { text-align: center; margin: 0 0 1.5em; }
+h1.title { font-size: 17pt; font-weight: bold; margin: 0 0 .35em; line-height: 1.2; }
+p.author, p.date { font-size: 10pt; margin: .12em 0; color: #333; }
+
+h2 {
+  font-size: 12pt;
+  margin: 1.05em 0 .4em;
+  padding-bottom: .15em;
+  border-bottom: 1px solid #ccc;
+  page-break-after: avoid;
+}
+
+p { margin: .5em 0; }
+ul { margin: .4em 0; padding-left: 1.25em; }
+li { margin: .26em 0; }
+
+code {
+  font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: .86em;
+}
+
+pre {
+  background: #f6f6f6;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  padding: .5em .7em;
+  margin: .5em 0;
+  font-size: .8em;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  page-break-inside: avoid;
+}
+pre code { font-size: 1em; background: none; }
